@@ -1,82 +1,82 @@
 import Phaser from "phaser";
 
-/**
- * We build the game at a "design size" (like a fixed canvas),
- * then Phaser scales it to fit the screen.
- */
 const DESIGN_W = 480;
 const DESIGN_H = 720;
 
-/** Game rules */
 const HEARTS_TO_WIN = 33;
 const STORAGE_KEY = "love_lap_best";
 
-/** Helper: keep values inside a min/max range */
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-/**
- * createGame()
- * React calls this when you press Start.
- * parent: the div we mount the Phaser canvas into
- * selectedCarUrl: image URL for the chosen car
- * onHud: callback to update React UI (hearts, best, label)
- * onExitToMenu: callback to return to React start screen (Space)
- */
 export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
   class MainScene extends Phaser.Scene {
     constructor() {
       super("main");
 
-      // ---- game state
+      // ---------- Game state ----------
       this.score = 0;
       this.best = 0;
       this.dead = false;
       this.finished = false;
 
-      // ---- movement & lanes (3 lanes)
+      // ---------- Lane movement ----------
       this.lanes = [];
-      this.laneIndex = 1; // start in middle lane
+      this.laneIndex = 1;
 
-      // ---- objects
+      // ---------- Objects ----------
       this.road = null;
       this.player = null;
       this.playerPlate = null;
 
-      // ---- groups (collections of things)
+      // ---------- Groups ----------
       this.enemies = null;
       this.hearts = null;
       this.cones = null;
 
-      // ---- timing / difficulty
+      // ---------- Difficulty / timers ----------
       this.roadSpeed = 280;
       this.spawnTimer = 0;
       this.heartTimer = 0;
 
-      // ---- UI
+      // ---------- UI / FX ----------
       this.msg = null;
       this.particles = null;
 
-      // ---- keyboard listener reference (so we can remove it cleanly)
+      // ---------- Keyboard listener (for cleanup) ----------
       this._onKeyDown = null;
 
-      // ---- SWIPE state
-      this.swipeStartX = null;
-      this.swipeStartY = null;
-      this.SWIPE_MIN_DISTANCE = 40; // pixels (tune if needed)
+      // ---------- Swipe handling (mobile) ----------
+      this.swipe = {
+        startX: null,
+        startY: null,
+        startTime: null,
+        moved: false,
+        lastLaneMoveTime: 0,
+      };
+
+      // Swipe tuning knobs (feel free to adjust)
+      this.SWIPE_MIN_DISTANCE = 55;      // px: how far finger must move
+      this.SWIPE_MAX_TIME = 420;         // ms: must be a quick-ish gesture
+      this.SWIPE_DIRECTION_RATIO = 1.35; // horizontal must dominate vertical
+      this.SWIPE_COOLDOWN_MS = 140;      // prevents double lane jumps
+
+      // ---------- Mobile end-screen tap behavior ----------
+      this._pressTimer = null;
+      this.LONG_PRESS_MS = 650;
+      this._longPressTriggered = false;
     }
 
     preload() {
-      // If an image fails to load, log it (helps debugging)
       this.load.on("loaderror", (file) => {
         console.error("❌ Phaser load error:", file?.key, file?.src);
       });
 
-      // Load the chosen car image
+      // Player chosen car image
       this.load.image("playerCarImg", selectedCarUrl);
 
-      // Create simple retro textures (no external assets needed)
+      // Generate retro textures (no external assets needed)
       this.makeRoadTexture("road");
       this.makePixelHeartTexture("heart");
       this.makeNeonCarTexture("enemyCar", 0xff4fd8, 0x27f7ff);
@@ -85,7 +85,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     }
 
     create() {
-      // ✅ Reset state here (Phaser restart does not rerun constructor)
+      // ✅ Reset state each time scene restarts
       this.score = 0;
       this.dead = false;
       this.finished = false;
@@ -100,11 +100,11 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       // Road background
       this.road = this.add.tileSprite(DESIGN_W / 2, DESIGN_H / 2, DESIGN_W, DESIGN_H, "road");
 
-      // Define 3 lanes across the screen
+      // 3 lanes across screen
       this.lanes = [DESIGN_W * 0.25, DESIGN_W * 0.5, DESIGN_W * 0.75];
       this.laneIndex = 1;
 
-      // Player: if the chosen image exists, use it, otherwise fallback
+      // Player sprite: chosen image if loaded, otherwise fallback
       const hasImg =
         this.textures.exists("playerCarImg") &&
         this.textures.get("playerCarImg")?.getSourceImage?.();
@@ -115,7 +115,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.player.setCollideWorldBounds(true);
       this.player.setDepth(10);
 
-      // Scale the player to a consistent height
+      // Scale player to consistent height so it fits on screen
       if (playerKey === "playerCarImg") {
         const img = this.textures.get("playerCarImg")?.getSourceImage?.();
         if (img?.height) {
@@ -128,29 +128,27 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         this.player.setDisplaySize(58, 96);
       }
 
-      // A subtle glow plate under the car (visual polish)
+      // Glow plate under the car (visual polish)
       this.playerPlate = this.add.ellipse(this.player.x, this.player.y + 22, 110, 52, 0x27f7ff, 0.10);
       this.playerPlate.setBlendMode(Phaser.BlendModes.ADD);
       this.playerPlate.setDepth(9);
 
-      // Create groups
+      // Groups
       this.enemies = this.physics.add.group();
       this.hearts = this.physics.add.group();
       this.cones = this.physics.add.group();
 
-      // Collisions / overlaps:
-      // Hearts: collect them
+      // Collisions: hearts collect, enemies/cones crash
       this.physics.add.overlap(this.player, this.hearts, (_, heart) => {
         if (this.dead || this.finished) return;
         heart.destroy();
         this.addScore(1);
       });
 
-      // Enemy cars or cones: crash
       this.physics.add.overlap(this.player, this.enemies, () => this.crash(), null, this);
       this.physics.add.overlap(this.player, this.cones, () => this.crash(), null, this);
 
-      // Message text overlay (for crash/win)
+      // End / info message
       this.msg = this.add
         .text(DESIGN_W / 2, DESIGN_H / 2, "", {
           fontSize: "22px",
@@ -160,10 +158,10 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         .setOrigin(0.5)
         .setDepth(999);
 
-      // Particles using the heart texture
+      // Heart particles
       this.particles = this.add.particles(0, 0, "heart", {
-        speed: { min: 40, max: 115 },
-        scale: { start: 0.75, end: 0 },
+        speed: { min: 40, max: 110 },
+        scale: { start: 0.55, end: 0 },
         lifespan: 520,
         quantity: 1,
         frequency: -1,
@@ -171,11 +169,10 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       });
 
       // ----------------------------
-      // ✅ Keyboard controls (Arrow/A/D)
-      // Space = menu, R = restart
+      // ✅ Keyboard controls (desktop)
       // ----------------------------
 
-      // Remove old listener if scene restarted
+      // Remove old listener if restarting
       if (this._onKeyDown) {
         window.removeEventListener("keydown", this._onKeyDown, { capture: true });
         this._onKeyDown = null;
@@ -190,67 +187,115 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         const isSpace = code === "Space" || key === " " || key === "Spacebar";
         const isR = code === "KeyR" || key === "r" || key === "R";
 
-        // stop page from scrolling when you press these keys
         if (isLeft || isRight || isSpace || isR) e.preventDefault();
 
-        // Space always returns to menu (React screen)
+        // Space = return to menu (React)
         if (isSpace) {
           onExitToMenu?.();
           return;
         }
 
-        // R restarts the game instantly
+        // R = restart
         if (isR) {
           this.scene.restart();
           return;
         }
 
-        // Move lanes only if game is active
         if (!this.dead && !this.finished) {
           if (isLeft) this.moveLane(-1);
           if (isRight) this.moveLane(1);
         }
       };
 
-      // capture:true makes it more reliable if other handlers exist
       window.addEventListener("keydown", this._onKeyDown, { passive: false, capture: true });
 
-      // Cleanup keyboard listener
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         if (this._onKeyDown) window.removeEventListener("keydown", this._onKeyDown, { capture: true });
         this._onKeyDown = null;
       });
 
       // ----------------------------
-      // ✅ Swipe controls (mobile)
+      // ✅ Touch controls (mobile)
+      //   - Swipe left/right to change lanes
+      //   - After crash/win: Tap = restart, Long press = menu
       // ----------------------------
-      // We'll detect horizontal swipes. Vertical swipes are ignored.
-      // This does NOT block scrolling globally because we keep the page locked during gameplay via CSS.
+
       this.input.on("pointerdown", (pointer) => {
-        this.swipeStartX = pointer.x;
-        this.swipeStartY = pointer.y;
+        // Start tracking a swipe
+        this.swipe.startX = pointer.x;
+        this.swipe.startY = pointer.y;
+        this.swipe.startTime = performance.now();
+        this.swipe.moved = false;
+
+        // If game ended, start long-press timer
+        if (this.dead || this.finished) {
+          this._longPressTriggered = false;
+          if (this._pressTimer) clearTimeout(this._pressTimer);
+
+          this._pressTimer = setTimeout(() => {
+            this._longPressTriggered = true;
+            onExitToMenu?.();
+          }, this.LONG_PRESS_MS);
+        }
+      });
+
+      this.input.on("pointermove", (pointer) => {
+        // Mark moved if finger moved a bit; helps distinguish taps from swipes
+        if (this.swipe.startX == null || this.swipe.startY == null) return;
+        const dx = pointer.x - this.swipe.startX;
+        const dy = pointer.y - this.swipe.startY;
+        if (Math.abs(dx) > 6 || Math.abs(dy) > 6) this.swipe.moved = true;
       });
 
       this.input.on("pointerup", (pointer) => {
-        if (this.dead || this.finished) return;
-        if (this.swipeStartX == null || this.swipeStartY == null) return;
+        // If game ended:
+        // - long press already returns to menu
+        // - quick tap restarts
+        if (this.dead || this.finished) {
+          if (this._pressTimer) clearTimeout(this._pressTimer);
 
-        const dx = pointer.x - this.swipeStartX;
-        const dy = pointer.y - this.swipeStartY;
+          // If long press already triggered, do nothing else
+          if (this._longPressTriggered) return;
 
-        // Only treat it as swipe if horizontal motion is large enough
-        // AND more horizontal than vertical (prevents accidental triggers)
-        if (Math.abs(dx) >= this.SWIPE_MIN_DISTANCE && Math.abs(dx) > Math.abs(dy)) {
-          if (dx < 0) this.moveLane(-1); // swiped left
-          else this.moveLane(1);         // swiped right
+          // Quick tap = restart
+          this.scene.restart();
+          return;
         }
 
-        this.swipeStartX = null;
-        this.swipeStartY = null;
+        // If game is active: evaluate swipe
+        if (this.swipe.startX == null || this.swipe.startY == null || this.swipe.startTime == null) return;
+
+        const endTime = performance.now();
+        const dt = endTime - this.swipe.startTime;
+
+        const dx = pointer.x - this.swipe.startX;
+        const dy = pointer.y - this.swipe.startY;
+
+        // Reset swipe tracking
+        this.swipe.startX = null;
+        this.swipe.startY = null;
+        this.swipe.startTime = null;
+
+        // Require: quick-ish
+        if (dt > this.SWIPE_MAX_TIME) return;
+
+        // Require: far enough
+        if (Math.abs(dx) < this.SWIPE_MIN_DISTANCE) return;
+
+        // Require: mostly horizontal (prevents diagonal scroll-y motions)
+        if (Math.abs(dx) < Math.abs(dy) * this.SWIPE_DIRECTION_RATIO) return;
+
+        // Cooldown: prevents one swipe from causing 2 lane moves
+        const now = performance.now();
+        if (now - this.swipe.lastLaneMoveTime < this.SWIPE_COOLDOWN_MS) return;
+        this.swipe.lastLaneMoveTime = now;
+
+        // Do the lane move
+        if (dx < 0) this.moveLane(-1);
+        else this.moveLane(1);
       });
     }
 
-    // Moves the car to the next lane with a small tween (smooth movement)
     moveLane(delta) {
       if (this.dead || this.finished) return;
 
@@ -270,7 +315,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     update(_, dtMs) {
       const dt = dtMs / 1000;
 
-      // Move road background down (makes it feel like driving forward)
+      // Scroll road
       this.road.tilePositionY -= this.roadSpeed * dt;
 
       // Keep plate under player
@@ -279,19 +324,17 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         this.playerPlate.y = this.player.y + 22;
       }
 
-      // Stop spawning if game ended
       if (this.dead || this.finished) return;
 
-      // Increase difficulty over time
+      // Ramp speed slowly
       this.roadSpeed += 8 * dt;
 
-      // Spawn enemy/cone
+      // Spawn obstacles
       this.spawnTimer += dt;
       const spawnEvery = clamp(0.78 - this.score * 0.01, 0.32, 0.78);
 
       if (this.spawnTimer >= spawnEvery) {
         this.spawnTimer = 0;
-
         const laneX = Phaser.Utils.Array.GetRandom(this.lanes);
         if (Math.random() < 0.72) this.spawnEnemy(laneX);
         else this.spawnCone(laneX);
@@ -305,18 +348,15 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         this.spawnHeart(laneX);
       }
 
-      // Clean up objects off screen
       this.cleanup(this.enemies);
       this.cleanup(this.cones);
       this.cleanup(this.hearts);
     }
 
-    // HUD label we show in React
     getHudLabel() {
       return `Hearts: ${this.score} / ${HEARTS_TO_WIN}`;
     }
 
-    // Create objects
     spawnEnemy(x) {
       const s = this.enemies.create(x, -70, "enemyCar");
       s.setVelocityY(this.roadSpeed + 80);
@@ -336,30 +376,24 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       s.setBlendMode(Phaser.BlendModes.ADD);
     }
 
-    // Remove objects that moved past bottom of the screen
     cleanup(group) {
       group.getChildren().forEach((obj) => {
         if (obj.y > DESIGN_H + 90) obj.destroy();
       });
     }
 
-    // When we collect a heart
     addScore(n) {
       this.score += n;
 
-      // Save best score
       if (this.score > this.best) {
         this.best = this.score;
         localStorage.setItem(STORAGE_KEY, String(this.best));
       }
 
-      // Update React HUD
       onHud?.({ score: this.score, best: this.best, lapLabel: this.getHudLabel() });
 
-      // Cute heart burst
       this.particles.emitParticleAt(this.player.x, this.player.y - 18, 10);
 
-      // Win condition
       if (this.score >= HEARTS_TO_WIN) {
         this.win();
       }
@@ -371,9 +405,10 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
       this.cameras.main.shake(120, 0.006);
 
-      this.msg.setText("CRASH! 😅\n\nPress R to restart\nPress Space for menu");
+      this.msg.setText(
+        "CRASH! 😅\n\nMobile: Tap to restart\nHold to menu\n\nDesktop: R = restart • Space = menu"
+      );
 
-      // Stop movement
       this.enemies.setVelocityY(0);
       this.cones.setVelocityY(0);
       this.hearts.setVelocityY(0);
@@ -386,10 +421,9 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.particles.emitParticleAt(DESIGN_W / 2, DESIGN_H / 2, 90);
 
       this.msg.setText(
-        `YOU DID IT 💛\n\nYou collected ${HEARTS_TO_WIN} hearts!\n\nHappy Valentine’s Day\nLove, Elvira\n\nPress Space for menu\nPress R to play again`
+        `YOU DID IT 💛\n\nYou collected ${HEARTS_TO_WIN} hearts!\n\nMobile: Tap to play again\nHold to menu\n\nDesktop: R = restart • Space = menu`
       );
 
-      // Stop movement
       this.enemies.setVelocityY(0);
       this.cones.setVelocityY(0);
       this.hearts.setVelocityY(0);
@@ -402,7 +436,6 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     makeRoadTexture(key) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
 
-      // Base background
       g.fillStyle(0x060813, 1);
       g.fillRect(0, 0, DESIGN_W, DESIGN_H);
 
@@ -453,7 +486,8 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     }
 
     makePixelHeartTexture(key) {
-      const w = 20, h = 20;
+      const w = 20,
+        h = 20;
       const g = this.make.graphics({ x: 0, y: 0, add: false });
 
       const px = (x, y, c, a = 1) => {
@@ -464,22 +498,36 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       const pink = 0xff4fd8;
       const cyan = 0x27f7ff;
 
-      // Heart body
       const coords = [
-        [6,4],[8,4],[10,4],[12,4],
-        [4,6],[6,6],[8,6],[10,6],[12,6],[14,6],
-        [4,8],[6,8],[8,8],[10,8],[12,8],[14,8],
-        [6,10],[8,10],[10,10],[12,10],
-        [8,12],[10,12],
-        [9,14],
+        [6, 4],
+        [8, 4],
+        [10, 4],
+        [12, 4],
+        [4, 6],
+        [6, 6],
+        [8, 6],
+        [10, 6],
+        [12, 6],
+        [14, 6],
+        [4, 8],
+        [6, 8],
+        [8, 8],
+        [10, 8],
+        [12, 8],
+        [14, 8],
+        [6, 10],
+        [8, 10],
+        [10, 10],
+        [12, 10],
+        [8, 12],
+        [10, 12],
+        [9, 14],
       ];
-      coords.forEach(([x,y]) => px(x, y, pink, 1));
+      coords.forEach(([x, y]) => px(x, y, pink, 1));
 
-      // Glow outline-ish
+      // tiny glow + highlight
       px(6, 2, cyan, 0.35);
       px(12, 2, cyan, 0.35);
-
-      // Highlight
       px(6, 6, 0xffffff, 0.30);
       px(8, 6, 0xffffff, 0.20);
 
@@ -489,23 +537,20 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
     makeNeonCarTexture(key, glow1, glow2) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
-      const w = 52, h = 88;
+      const w = 52,
+        h = 88;
 
-      // Glow blocks
       g.fillStyle(glow2, 0.20);
       g.fillRoundedRect(0, 0, w, h, 10);
       g.fillStyle(glow1, 0.22);
       g.fillRoundedRect(2, 2, w - 4, h - 4, 10);
 
-      // Body
       g.fillStyle(0x0b1020, 0.85);
       g.fillRoundedRect(6, 6, w - 12, h - 12, 10);
 
-      // Neon outline
       g.lineStyle(2, glow2, 0.85);
       g.strokeRoundedRect(6.5, 6.5, w - 13, h - 13, 10);
 
-      // Windows
       g.fillStyle(glow2, 0.18);
       g.fillRoundedRect(14, 18, w - 28, 18, 8);
       g.fillRoundedRect(14, 52, w - 28, 18, 8);
@@ -516,7 +561,8 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
     makeNeonConeTexture(key, glow1, glow2) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
-      const w = 44, h = 56;
+      const w = 44,
+        h = 56;
 
       g.fillStyle(glow2, 0.18);
       g.fillTriangle(w / 2, 0, w, h, 0, h);
@@ -535,20 +581,14 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     }
   }
 
-  // Phaser game configuration
   const config = {
     type: Phaser.AUTO,
     width: DESIGN_W,
     height: DESIGN_H,
     parent,
-    physics: {
-      default: "arcade",
-      arcade: { debug: false },
-    },
+    physics: { default: "arcade", arcade: { debug: false } },
     scene: [MainScene],
     backgroundColor: "#0b1020",
-
-    // ✅ Fit the canvas inside its parent (your gameShell) on desktop & mobile
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
