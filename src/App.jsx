@@ -90,8 +90,8 @@ export default function App() {
       <div className="wrap">
         <div className="welcome">
           <div className="welcomeCard">
-            <h1>LOVE LAP: HIGHWAY RUN 💛</h1>
-            <p>Pick a car, then collect 10 hearts to win.</p>
+            <h1>The Heart Gem Heist </h1>
+            <p>Pick a car, then collect 33 hearts to win.</p>
 
             <div className="carGrid">
               {CARS.map((c) => (
@@ -131,7 +131,7 @@ export default function App() {
     <div className="wrap gameLayout">
       <div className="topbar">
         <div className="title">
-          <h1>LOVE LAP: HIGHWAY RUN 💙</h1>
+          <h1>The Heart Gem Heist 💙</h1>
           <p>{label} • ← → or A/D • Space = Menu • R = Restart • Swipe on mobile</p>
         </div>
 
