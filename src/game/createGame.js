@@ -3,8 +3,11 @@ import Phaser from "phaser";
 const DESIGN_W = 480;
 const DESIGN_H = 720;
 
-const HEARTS_TO_WIN = 33;
-const STORAGE_KEY = "love_lap_best";
+//  Win requirements
+const HEARTS_TO_WIN = 34;
+const BALLS_TO_WIN = 5;
+
+const STORAGE_KEY = "love_lap_best_total";
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
@@ -15,57 +18,52 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     constructor() {
       super("main");
 
-      // ---------- Game state ----------
-      this.score = 0;
+      this.heartsCollected = 0;
+      this.ballsCollected = 0;
       this.best = 0;
+
       this.dead = false;
       this.finished = false;
 
-      // ---------- Lane movement ----------
       this.lanes = [];
       this.laneIndex = 1;
 
-      // ---------- Objects ----------
       this.road = null;
       this.player = null;
       this.playerPlate = null;
 
-      // ---------- Groups ----------
       this.enemies = null;
       this.hearts = null;
       this.cones = null;
+      this.balls = null;
 
-      // ---------- Difficulty / timers ----------
       this.roadSpeed = 280;
       this.spawnTimer = 0;
       this.heartTimer = 0;
 
-      // ---------- UI / FX ----------
+      this.ballTimer = 0;
+      this.nextBallIn = this.pickNextBallTime();
+
       this.msg = null;
       this.particles = null;
 
-      // ---------- Keyboard listener (for cleanup) ----------
       this._onKeyDown = null;
 
-      // ---------- Swipe handling (mobile) ----------
-      this.swipe = {
-        startX: null,
-        startY: null,
-        startTime: null,
-        moved: false,
-        lastLaneMoveTime: 0,
-      };
+      this.swipe = { startX: null, startY: null, startTime: null, lastLaneMoveTime: 0 };
+      this.SWIPE_MIN_DISTANCE = 55;
+      this.SWIPE_MAX_TIME = 420;
+      this.SWIPE_DIRECTION_RATIO = 1.35;
+      this.SWIPE_COOLDOWN_MS = 140;
 
-      // Swipe tuning knobs (feel free to adjust)
-      this.SWIPE_MIN_DISTANCE = 55;      // px: how far finger must move
-      this.SWIPE_MAX_TIME = 420;         // ms: must be a quick-ish gesture
-      this.SWIPE_DIRECTION_RATIO = 1.35; // horizontal must dominate vertical
-      this.SWIPE_COOLDOWN_MS = 140;      // prevents double lane jumps
-
-      // ---------- Mobile end-screen tap behavior ----------
       this._pressTimer = null;
       this.LONG_PRESS_MS = 650;
       this._longPressTriggered = false;
+
+      this.mobileControls = null;
+    }
+
+    pickNextBallTime() {
+      return Phaser.Math.Between(5, 10);
     }
 
     preload() {
@@ -73,20 +71,19 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         console.error("❌ Phaser load error:", file?.key, file?.src);
       });
 
-      // Player chosen car image
       this.load.image("playerCarImg", selectedCarUrl);
 
-      // Generate retro textures (no external assets needed)
       this.makeRoadTexture("road");
       this.makePixelHeartTexture("heart");
+      this.makeBasketballTexture("basketball");
       this.makeNeonCarTexture("enemyCar", 0xff4fd8, 0x27f7ff);
       this.makeNeonConeTexture("cone", 0xffe66d, 0xff4fd8);
       this.makeFallbackCarTexture("fallbackCar");
     }
 
     create() {
-      // ✅ Reset state each time scene restarts
-      this.score = 0;
+      this.heartsCollected = 0;
+      this.ballsCollected = 0;
       this.dead = false;
       this.finished = false;
 
@@ -94,17 +91,17 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.spawnTimer = 0;
       this.heartTimer = 0;
 
-      this.best = Number(localStorage.getItem(STORAGE_KEY) || "0");
-      onHud?.({ score: this.score, best: this.best, lapLabel: this.getHudLabel() });
+      this.ballTimer = 0;
+      this.nextBallIn = this.pickNextBallTime();
 
-      // Road background
+      this.best = Number(localStorage.getItem(STORAGE_KEY) || "0");
+      this.pushHud();
+
       this.road = this.add.tileSprite(DESIGN_W / 2, DESIGN_H / 2, DESIGN_W, DESIGN_H, "road");
 
-      // 3 lanes across screen
       this.lanes = [DESIGN_W * 0.25, DESIGN_W * 0.5, DESIGN_W * 0.75];
       this.laneIndex = 1;
 
-      // Player sprite: chosen image if loaded, otherwise fallback
       const hasImg =
         this.textures.exists("playerCarImg") &&
         this.textures.get("playerCarImg")?.getSourceImage?.();
@@ -115,7 +112,6 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.player.setCollideWorldBounds(true);
       this.player.setDepth(10);
 
-      // Scale player to consistent height so it fits on screen
       if (playerKey === "playerCarImg") {
         const img = this.textures.get("playerCarImg")?.getSourceImage?.();
         if (img?.height) {
@@ -128,37 +124,35 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         this.player.setDisplaySize(58, 96);
       }
 
-      // Glow plate under the car (visual polish)
       this.playerPlate = this.add.ellipse(this.player.x, this.player.y + 22, 110, 52, 0x27f7ff, 0.10);
       this.playerPlate.setBlendMode(Phaser.BlendModes.ADD);
       this.playerPlate.setDepth(9);
 
-      // Groups
       this.enemies = this.physics.add.group();
       this.hearts = this.physics.add.group();
       this.cones = this.physics.add.group();
+      this.balls = this.physics.add.group();
 
-      // Collisions: hearts collect, enemies/cones crash
       this.physics.add.overlap(this.player, this.hearts, (_, heart) => {
         if (this.dead || this.finished) return;
         heart.destroy();
-        this.addScore(1);
+        this.collectHeart();
+      });
+
+      this.physics.add.overlap(this.player, this.balls, (_, ball) => {
+        if (this.dead || this.finished) return;
+        ball.destroy();
+        this.collectBall();
       });
 
       this.physics.add.overlap(this.player, this.enemies, () => this.crash(), null, this);
       this.physics.add.overlap(this.player, this.cones, () => this.crash(), null, this);
 
-      // End / info message
       this.msg = this.add
-        .text(DESIGN_W / 2, DESIGN_H / 2, "", {
-          fontSize: "22px",
-          color: "#ffffff",
-          align: "center",
-        })
+        .text(DESIGN_W / 2, DESIGN_H / 2, "", { fontSize: "22px", color: "#ffffff", align: "center" })
         .setOrigin(0.5)
         .setDepth(999);
 
-      // Heart particles
       this.particles = this.add.particles(0, 0, "heart", {
         speed: { min: 40, max: 110 },
         scale: { start: 0.55, end: 0 },
@@ -168,11 +162,9 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         blendMode: Phaser.BlendModes.ADD,
       });
 
-      // ----------------------------
-      // ✅ Keyboard controls (desktop)
-      // ----------------------------
+      if (this.isTouchDevice()) this.createMobileArrows();
 
-      // Remove old listener if restarting
+      // Keyboard
       if (this._onKeyDown) {
         window.removeEventListener("keydown", this._onKeyDown, { capture: true });
         this._onKeyDown = null;
@@ -189,17 +181,8 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
         if (isLeft || isRight || isSpace || isR) e.preventDefault();
 
-        // Space = return to menu (React)
-        if (isSpace) {
-          onExitToMenu?.();
-          return;
-        }
-
-        // R = restart
-        if (isR) {
-          this.scene.restart();
-          return;
-        }
+        if (isSpace) return onExitToMenu?.();
+        if (isR) return this.scene.restart();
 
         if (!this.dead && !this.finished) {
           if (isLeft) this.moveLane(-1);
@@ -212,22 +195,19 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         if (this._onKeyDown) window.removeEventListener("keydown", this._onKeyDown, { capture: true });
         this._onKeyDown = null;
+
+        if (this.mobileControls) {
+          this.mobileControls.destroy(true);
+          this.mobileControls = null;
+        }
       });
 
-      // ----------------------------
-      // ✅ Touch controls (mobile)
-      //   - Swipe left/right to change lanes
-      //   - After crash/win: Tap = restart, Long press = menu
-      // ----------------------------
-
+      // Touch
       this.input.on("pointerdown", (pointer) => {
-        // Start tracking a swipe
         this.swipe.startX = pointer.x;
         this.swipe.startY = pointer.y;
         this.swipe.startTime = performance.now();
-        this.swipe.moved = false;
 
-        // If game ended, start long-press timer
         if (this.dead || this.finished) {
           this._longPressTriggered = false;
           if (this._pressTimer) clearTimeout(this._pressTimer);
@@ -239,61 +219,105 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         }
       });
 
-      this.input.on("pointermove", (pointer) => {
-        // Mark moved if finger moved a bit; helps distinguish taps from swipes
-        if (this.swipe.startX == null || this.swipe.startY == null) return;
-        const dx = pointer.x - this.swipe.startX;
-        const dy = pointer.y - this.swipe.startY;
-        if (Math.abs(dx) > 6 || Math.abs(dy) > 6) this.swipe.moved = true;
-      });
-
       this.input.on("pointerup", (pointer) => {
-        // If game ended:
-        // - long press already returns to menu
-        // - quick tap restarts
         if (this.dead || this.finished) {
           if (this._pressTimer) clearTimeout(this._pressTimer);
-
-          // If long press already triggered, do nothing else
           if (this._longPressTriggered) return;
-
-          // Quick tap = restart
           this.scene.restart();
           return;
         }
 
-        // If game is active: evaluate swipe
         if (this.swipe.startX == null || this.swipe.startY == null || this.swipe.startTime == null) return;
 
-        const endTime = performance.now();
-        const dt = endTime - this.swipe.startTime;
-
+        const dt = performance.now() - this.swipe.startTime;
         const dx = pointer.x - this.swipe.startX;
         const dy = pointer.y - this.swipe.startY;
 
-        // Reset swipe tracking
         this.swipe.startX = null;
         this.swipe.startY = null;
         this.swipe.startTime = null;
 
-        // Require: quick-ish
         if (dt > this.SWIPE_MAX_TIME) return;
-
-        // Require: far enough
         if (Math.abs(dx) < this.SWIPE_MIN_DISTANCE) return;
-
-        // Require: mostly horizontal (prevents diagonal scroll-y motions)
         if (Math.abs(dx) < Math.abs(dy) * this.SWIPE_DIRECTION_RATIO) return;
 
-        // Cooldown: prevents one swipe from causing 2 lane moves
         const now = performance.now();
         if (now - this.swipe.lastLaneMoveTime < this.SWIPE_COOLDOWN_MS) return;
         this.swipe.lastLaneMoveTime = now;
 
-        // Do the lane move
         if (dx < 0) this.moveLane(-1);
         else this.moveLane(1);
       });
+    }
+
+    pushHud() {
+      // best = best total collected
+      const total = this.heartsCollected + this.ballsCollected;
+      if (total > this.best) {
+        this.best = total;
+        localStorage.setItem(STORAGE_KEY, String(this.best));
+      }
+
+      onHud?.({
+        hearts: this.heartsCollected,
+        balls: this.ballsCollected,
+        best: this.best,
+        statusLabel: this.getStatusLabel(),
+      });
+    }
+
+    getStatusLabel() {
+      return `💙 ${this.heartsCollected}/${HEARTS_TO_WIN} • 🏀 ${this.ballsCollected}/${BALLS_TO_WIN}`;
+    }
+
+    isTouchDevice() {
+      const dev = this.sys.game.device;
+      return !!dev?.input?.touch;
+    }
+
+    createMobileArrows() {
+      this.mobileControls = this.add.container(0, 0);
+      this.mobileControls.setDepth(2000);
+
+      const y = DESIGN_H - 86;
+      const leftX = 78;
+      const rightX = DESIGN_W - 78;
+
+      const makeBtn = (x, label, onPress) => {
+        const circle = this.add.circle(x, y, 46, 0x27f7ff, 0.10);
+        circle.setStrokeStyle(2, 0xff4fd8, 0.55);
+        circle.setBlendMode(Phaser.BlendModes.ADD);
+
+        const txt = this.add.text(x, y, label, {
+          fontSize: "28px",
+          color: "#ffffff",
+          fontStyle: "700",
+        });
+        txt.setOrigin(0.5);
+        txt.setShadow(0, 0, "#27f7ff", 12, true, true);
+
+        circle.setInteractive({ useHandCursor: true });
+        circle.on("pointerdown", (p) => {
+          this.swipe.startX = null;
+          this.swipe.startY = null;
+          this.swipe.startTime = null;
+
+          if (!this.dead && !this.finished) onPress();
+          p.event?.stopPropagation?.();
+        });
+
+        this.mobileControls.add([circle, txt]);
+      };
+
+      makeBtn(leftX, "◀", () => this.moveLane(-1));
+      makeBtn(rightX, "▶", () => this.moveLane(1));
+
+      const hint = this.add.text(DESIGN_W / 2, DESIGN_H - 24, "Tap arrows (swipe optional)", {
+        fontSize: "12px",
+        color: "rgba(255,255,255,0.70)",
+      });
+      hint.setOrigin(0.5);
+      this.mobileControls.add(hint);
     }
 
     moveLane(delta) {
@@ -315,10 +339,8 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     update(_, dtMs) {
       const dt = dtMs / 1000;
 
-      // Scroll road
       this.road.tilePositionY -= this.roadSpeed * dt;
 
-      // Keep plate under player
       if (this.playerPlate) {
         this.playerPlate.x = this.player.x;
         this.playerPlate.y = this.player.y + 22;
@@ -326,12 +348,11 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
       if (this.dead || this.finished) return;
 
-      // Ramp speed slowly
       this.roadSpeed += 8 * dt;
 
-      // Spawn obstacles
+      // Obstacles
       this.spawnTimer += dt;
-      const spawnEvery = clamp(0.78 - this.score * 0.01, 0.32, 0.78);
+      const spawnEvery = clamp(0.78 - this.heartsCollected * 0.01, 0.32, 0.78);
 
       if (this.spawnTimer >= spawnEvery) {
         this.spawnTimer = 0;
@@ -340,7 +361,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         else this.spawnCone(laneX);
       }
 
-      // Spawn hearts
+      // Hearts
       this.heartTimer += dt;
       if (this.heartTimer >= 0.75) {
         this.heartTimer = 0;
@@ -348,13 +369,22 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
         this.spawnHeart(laneX);
       }
 
+      // Basketballs
+      this.ballTimer += dt;
+      if (this.ballTimer >= this.nextBallIn) {
+        this.ballTimer = 0;
+        this.nextBallIn = this.pickNextBallTime();
+
+        if (Math.random() < 0.6) {
+          const laneX = Phaser.Utils.Array.GetRandom(this.lanes);
+          this.spawnBasketball(laneX);
+        }
+      }
+
       this.cleanup(this.enemies);
       this.cleanup(this.cones);
       this.cleanup(this.hearts);
-    }
-
-    getHudLabel() {
-      return `Hearts: ${this.score} / ${HEARTS_TO_WIN}`;
+      this.cleanup(this.balls);
     }
 
     spawnEnemy(x) {
@@ -376,27 +406,37 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       s.setBlendMode(Phaser.BlendModes.ADD);
     }
 
+    spawnBasketball(x) {
+      const s = this.balls.create(x, -50, "basketball");
+      s.setVelocityY(this.roadSpeed + 45);
+      s.setAngularVelocity(220);
+      s.setBlendMode(Phaser.BlendModes.ADD);
+    }
+
     cleanup(group) {
       group.getChildren().forEach((obj) => {
         if (obj.y > DESIGN_H + 90) obj.destroy();
       });
     }
 
-    addScore(n) {
-      this.score += n;
-
-      if (this.score > this.best) {
-        this.best = this.score;
-        localStorage.setItem(STORAGE_KEY, String(this.best));
-      }
-
-      onHud?.({ score: this.score, best: this.best, lapLabel: this.getHudLabel() });
-
+    collectHeart() {
+      this.heartsCollected += 1;
       this.particles.emitParticleAt(this.player.x, this.player.y - 18, 10);
+      this.pushHud();
+      this.checkWin();
+    }
 
-      if (this.score >= HEARTS_TO_WIN) {
-        this.win();
-      }
+    collectBall() {
+      this.ballsCollected += 1;
+      this.particles.emitParticleAt(this.player.x, this.player.y - 18, 12);
+      this.pushHud();
+      this.checkWin();
+    }
+
+    checkWin() {
+      const wonHearts = this.heartsCollected >= HEARTS_TO_WIN;
+      const wonBalls = this.ballsCollected >= BALLS_TO_WIN;
+      if (wonHearts && wonBalls) this.win();
     }
 
     crash() {
@@ -406,12 +446,13 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.cameras.main.shake(120, 0.006);
 
       this.msg.setText(
-        "CRASH! 😅\n\nMobile: Tap to restart\nHold to menu\n\nDesktop: R = restart • Space = menu"
+        "CRASH! 😅\n\nMobile: Tap = restart\nHold = menu\n\nDesktop: R = restart • Space = menu"
       );
 
       this.enemies.setVelocityY(0);
       this.cones.setVelocityY(0);
       this.hearts.setVelocityY(0);
+      this.balls.setVelocityY(0);
     }
 
     win() {
@@ -421,17 +462,16 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       this.particles.emitParticleAt(DESIGN_W / 2, DESIGN_H / 2, 90);
 
       this.msg.setText(
-        `YOU DID IT 💛\n\nYou collected ${HEARTS_TO_WIN} hearts!\n\nMobile: Tap to play again\nHold to menu\n\nDesktop: R = restart • Space = menu`
+        `YOU WIN 💙\n\n💙 ${this.heartsCollected}/${HEARTS_TO_WIN}\n🏀 ${this.ballsCollected}/${BALLS_TO_WIN}\n\nMobile: Tap = play again\nHold = menu\n\nDesktop: R = restart • Space = menu`
       );
 
       this.enemies.setVelocityY(0);
       this.cones.setVelocityY(0);
       this.hearts.setVelocityY(0);
+      this.balls.setVelocityY(0);
     }
 
-    // ----------------------------
-    // Retro texture generators
-    // ----------------------------
+    // -------- Textures --------
 
     makeRoadTexture(key) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
@@ -439,31 +479,26 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       g.fillStyle(0x060813, 1);
       g.fillRect(0, 0, DESIGN_W, DESIGN_H);
 
-      // Neon horizon glow
       g.fillStyle(0xff4fd8, 0.10);
       g.fillRect(0, 0, DESIGN_W, 180);
 
       const cyan = 0x27f7ff;
       const pink = 0xff4fd8;
 
-      // Center line
       g.fillStyle(cyan, 0.12);
       g.fillRect(DESIGN_W / 2 - 3, 160, 6, DESIGN_H);
 
-      // Dashed lane lines
       g.fillStyle(pink, 0.10);
       for (let y = 200; y < DESIGN_H; y += 70) {
         g.fillRect(DESIGN_W * 0.25 - 2, y, 4, 26);
         g.fillRect(DESIGN_W * 0.75 - 2, y, 4, 26);
       }
 
-      // Horizontal grid lines
       g.fillStyle(cyan, 0.08);
       for (let y = 200; y < DESIGN_H; y += 44) {
         g.fillRect(0, y, DESIGN_W, 2);
       }
 
-      // Side rails
       g.fillStyle(pink, 0.10);
       g.fillRect(16, 180, 6, DESIGN_H);
       g.fillRect(DESIGN_W - 22, 180, 6, DESIGN_H);
@@ -486,8 +521,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
     }
 
     makePixelHeartTexture(key) {
-      const w = 20,
-        h = 20;
+      const w = 20, h = 20;
       const g = this.make.graphics({ x: 0, y: 0, add: false });
 
       const px = (x, y, c, a = 1) => {
@@ -499,33 +533,15 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       const cyan = 0x27f7ff;
 
       const coords = [
-        [6, 4],
-        [8, 4],
-        [10, 4],
-        [12, 4],
-        [4, 6],
-        [6, 6],
-        [8, 6],
-        [10, 6],
-        [12, 6],
-        [14, 6],
-        [4, 8],
-        [6, 8],
-        [8, 8],
-        [10, 8],
-        [12, 8],
-        [14, 8],
-        [6, 10],
-        [8, 10],
-        [10, 10],
-        [12, 10],
-        [8, 12],
-        [10, 12],
-        [9, 14],
+        [6,4],[8,4],[10,4],[12,4],
+        [4,6],[6,6],[8,6],[10,6],[12,6],[14,6],
+        [4,8],[6,8],[8,8],[10,8],[12,8],[14,8],
+        [6,10],[8,10],[10,10],[12,10],
+        [8,12],[10,12],
+        [9,14],
       ];
-      coords.forEach(([x, y]) => px(x, y, pink, 1));
+      coords.forEach(([x,y]) => px(x, y, pink, 1));
 
-      // tiny glow + highlight
       px(6, 2, cyan, 0.35);
       px(12, 2, cyan, 0.35);
       px(6, 6, 0xffffff, 0.30);
@@ -535,10 +551,45 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
       g.destroy();
     }
 
+    makeBasketballTexture(key) {
+      const g = this.make.graphics({ x: 0, y: 0, add: false });
+      const size = 34;
+      const r = size / 2;
+
+      g.fillStyle(0xff9b2f, 0.22);
+      g.fillCircle(r, r, r);
+
+      g.fillStyle(0xff7a18, 0.95);
+      g.fillCircle(r, r, r - 3);
+
+      g.lineStyle(2, 0x1b0e06, 0.85);
+      g.strokeCircle(r, r, r - 3);
+
+      g.beginPath();
+      g.moveTo(r, 4);
+      g.lineTo(r, size - 4);
+      g.strokePath();
+
+      g.beginPath();
+      g.moveTo(4, r);
+      g.lineTo(size - 4, r);
+      g.strokePath();
+
+      g.beginPath();
+      g.arc(r - 6, r, r - 6, Phaser.Math.DegToRad(-60), Phaser.Math.DegToRad(60), false);
+      g.strokePath();
+
+      g.beginPath();
+      g.arc(r + 6, r, r - 6, Phaser.Math.DegToRad(120), Phaser.Math.DegToRad(240), false);
+      g.strokePath();
+
+      g.generateTexture(key, size, size);
+      g.destroy();
+    }
+
     makeNeonCarTexture(key, glow1, glow2) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
-      const w = 52,
-        h = 88;
+      const w = 52, h = 88;
 
       g.fillStyle(glow2, 0.20);
       g.fillRoundedRect(0, 0, w, h, 10);
@@ -561,8 +612,7 @@ export function createGame({ parent, onHud, selectedCarUrl, onExitToMenu }) {
 
     makeNeonConeTexture(key, glow1, glow2) {
       const g = this.make.graphics({ x: 0, y: 0, add: false });
-      const w = 44,
-        h = 56;
+      const w = 44, h = 56;
 
       g.fillStyle(glow2, 0.18);
       g.fillTriangle(w / 2, 0, w, h, 0, h);
