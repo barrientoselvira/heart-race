@@ -24,7 +24,7 @@ export default function App() {
   const [hearts, setHearts] = useState(0);
   const [balls, setBalls] = useState(0);
   const [best, setBest] = useState(() => Number(localStorage.getItem("love_lap_best_total") || "0"));
-  const [statusLabel, setStatusLabel] = useState("💗 0/10 • 🏀 0/5");
+  const [statusLabel, setStatusLabel] = useState("💗 0/34 • ⛽ 0/5");
 
   useEffect(() => {
     document.body.classList.toggle("game-running", started);
@@ -78,7 +78,7 @@ export default function App() {
           <div className="welcomeCard">
             <h1>{GAME_TITLE} 💙</h1>
             <p>
-              Win by collecting <strong>34 💗 hearts</strong> AND <strong>5 🏀 basketballs</strong>.
+              Win by collecting <strong>34 💗 hearts</strong> AND <strong>5 ⛽ gas tanks</strong>.
             </p>
 
             <div className="carGrid">
@@ -126,7 +126,7 @@ export default function App() {
             <strong>💗</strong>: {hearts}
           </div>
           <div className="pill">
-            <strong>🏀</strong>: {balls}
+            <strong>⛽</strong>: {balls}
           </div>
           <div className="pill">
             <strong>Best</strong>: {best}
@@ -138,7 +138,7 @@ export default function App() {
         <div id="phaser-root" ref={phaserRef} />
       </div>
 
-      <div className="footer">Happy Valentine’s Day 💙 Love, Elvira</div>
+      <div className="footer">💙 Enjoy, Elvira 💙 </div>
     </div>
   );
 }
